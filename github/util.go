@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/go-github/v66/github"
 	"github.com/hashicorp/go-cty/cty"
@@ -21,6 +22,15 @@ import (
 const (
 	// https://developer.github.com/guides/traversing-with-pagination/#basics-of-pagination
 	maxPerPage = 100
+)
+
+// Variables used to waiting for the creation of resources before calling resourceGithubRepositoryFileRead
+// https://github.com/integrations/terraform-provider-github/issues/2047
+const (
+	statusPending = "pending"
+	statusReady   = "ready"
+	timeout       = 5 * time.Minute
+	retryDelay    = 10 * time.Second
 )
 
 func checkOrganization(meta interface{}) error {

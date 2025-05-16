@@ -4,8 +4,11 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"strings"
+	"time"
 
 	"github.com/google/go-github/v66/github"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/retry"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 )
 
@@ -64,6 +67,10 @@ func resourceGithubActionsVariableCreate(d *schema.ResourceData, meta interface{
 
 	_, err := client.Actions.CreateRepoVariable(ctx, owner, repo, variable)
 	if err != nil {
+		return err
+	}
+
+	if _, err := waitActionVariableReady(ctx, client, owner, repo, d.Get("variable_name").(string)); err != nil {
 		return err
 	}
 
@@ -146,4 +153,37 @@ func resourceGithubActionsVariableDelete(d *schema.ResourceData, meta interface{
 	_, err = client.Actions.DeleteRepoVariable(ctx, orgName, repoName, variableName)
 
 	return err
+}
+
+func waitActionVariableReady(ctx context.Context, client *github.Client, owner, repoName, name string) (*github.ActionsVariable, error) {
+	const timeout = 5 * time.Minute
+	stateconf := &retry.StateChangeConf{
+		Delay:   retryDelay,
+		Pending: []string{statusPending},
+		Refresh: statusActionVariable(ctx, client, owner, repoName, name),
+		Target:  []string{statusReady},
+		Timeout: timeout,
+	}
+
+	output, err := stateconf.WaitForStateContext(ctx)
+	if v, ok := output.(*github.ActionsVariable); ok {
+		return v, err
+	}
+	return nil, err
+}
+
+func statusActionVariable(ctx context.Context, client *github.Client, owner, repoName, name string) retry.StateRefreshFunc {
+	return func() (interface{}, string, error) {
+		envVar, resp, err := client.Actions.GetRepoVariable(ctx, owner, repoName, name)
+		if err != nil {
+			if resp.StatusCode == http.StatusNotFound {
+				return nil, statusPending, nil
+			}
+		}
+		// GitHub API returns the environment variables in uppercase
+		if envVar.Name == strings.ToUpper(name) {
+			return envVar, statusReady, nil
+		}
+		return nil, statusPending, nil
+	}
 }

@@ -11,6 +11,7 @@ import (
 	"fmt"
 
 	"github.com/google/go-github/v66/github"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/retry"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 )
 
@@ -270,6 +271,10 @@ func resourceGithubRepositoryFileCreate(d *schema.ResourceData, meta interface{}
 		return err
 	}
 
+	if _, err := waitFileReady(d, ctx, client, owner, repo, file); err != nil {
+		return err
+	}
+
 	d.SetId(fmt.Sprintf("%s/%s", repo, file))
 	if err = d.Set("commit_sha", create.Commit.GetSHA()); err != nil {
 		return err
@@ -286,22 +291,7 @@ func resourceGithubRepositoryFileRead(d *schema.ResourceData, meta interface{}) 
 
 	repo, file := splitRepoFilePath(d.Id())
 
-	opts := &github.RepositoryContentGetOptions{}
-
-	if branch, ok := d.GetOk("branch"); ok {
-		log.Printf("[DEBUG] Using explicitly set branch: %s", branch.(string))
-		if err := checkRepositoryBranchExists(client, owner, repo, branch.(string)); err != nil {
-			if d.Get("autocreate_branch").(bool) {
-				branch = d.Get("autocreate_branch_source_branch").(string)
-			} else {
-				log.Printf("[INFO] Removing repository path %s/%s/%s from state because the branch no longer exists in GitHub",
-					owner, repo, file)
-				d.SetId("")
-				return nil
-			}
-		}
-		opts.Ref = branch.(string)
-	}
+	opts := createRepositoryContentGetOptions(d, client, owner, repo, file)
 
 	fc, _, _, err := client.Repositories.GetContents(ctx, owner, repo, file, opts)
 	if err != nil {
@@ -387,6 +377,64 @@ func resourceGithubRepositoryFileRead(d *schema.ResourceData, meta interface{}) 
 	}
 
 	return nil
+}
+
+func waitFileReady(d *schema.ResourceData, ctx context.Context, client *github.Client, owner, repo, file string) (*github.RepositoryContent, error) {
+
+	stateconf := &retry.StateChangeConf{
+		Delay:   retryDelay,
+		Pending: []string{statusPending},
+		Refresh: statusFile(d, ctx, client, owner, repo, file),
+		Target:  []string{statusReady},
+		Timeout: timeout,
+	}
+
+	output, err := stateconf.WaitForStateContext(ctx)
+	if v, ok := output.(*github.RepositoryContent); ok {
+		return v, err
+	}
+
+	return nil, err
+}
+
+func createRepositoryContentGetOptions(d *schema.ResourceData, client *github.Client, owner, repo, file string) *github.RepositoryContentGetOptions {
+	opts := &github.RepositoryContentGetOptions{}
+
+	if branch, ok := d.GetOk("branch"); ok {
+		log.Printf("[DEBUG] Using explicitly set branch: %s", branch.(string))
+		if err := checkRepositoryBranchExists(client, owner, repo, branch.(string)); err != nil {
+			if d.Get("autocreate_branch").(bool) {
+				branch = d.Get("autocreate_branch_source_branch").(string)
+			} else {
+				log.Printf("[INFO] Removing repository path %s/%s/%s from state because the branch no longer exists in GitHub",
+					owner, repo, file)
+				d.SetId("")
+				return nil
+			}
+		}
+		opts.Ref = branch.(string)
+	}
+
+	return opts
+}
+
+func statusFile(d *schema.ResourceData, ctx context.Context, client *github.Client, owner, repo, file string) retry.StateRefreshFunc {
+	return func() (interface{}, string, error) {
+		opts := createRepositoryContentGetOptions(d, client, owner, repo, file)
+
+		fileContent, _, resp, err := client.Repositories.GetContents(ctx, owner, repo, file, opts)
+		if err != nil {
+			if resp.StatusCode == http.StatusNotFound {
+				return nil, statusPending, nil
+			}
+		}
+
+		if fileContent.GetPath() == file {
+			return fileContent, statusReady, nil
+		}
+
+		return nil, statusPending, nil
+	}
 }
 
 func resourceGithubRepositoryFileUpdate(d *schema.ResourceData, meta interface{}) error {
